@@ -1,0 +1,5 @@
+selectolax
+httpx
+pandas
+streamlit
+lxml
