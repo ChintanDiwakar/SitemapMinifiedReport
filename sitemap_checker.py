@@ -60,7 +60,7 @@ def fetch_url_details(url):
 def main():
     st.title("Sitemap Status Checker")
     
-    sitemap_url = st.text_input("Enter Sitemap URL:", "https://www.profoundproperties.com/sitemap.xml")
+    sitemap_url = st.text_input("Enter Sitemap URL:", "https://www.squareyards.com/sitemap.xml")
     
     if st.button("Start Checking"):
         st.write("Fetching Sitemap URLs... Please wait.")
