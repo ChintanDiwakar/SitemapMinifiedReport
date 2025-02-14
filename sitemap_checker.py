@@ -22,7 +22,7 @@ def fetch_sitemap_urls(sitemap_url):
         
         urls = [elem.text for elem in root.findall('.//ns:loc', namespaces)]
         # Check first 100 URLs only
-        return urls[:10]
+        # return urls[:10]
         return urls
     except Exception as e:
         st.error(f"Error fetching sitemap: {e}")
@@ -59,12 +59,24 @@ def fetch_url_details(url):
 
 def main():
     st.title("Sitemap Status Checker")
+
     
     sitemap_url = st.text_input("Enter Sitemap URL:", "https://www.profoundproperties.com/sitemap.xml")
+    check_url = st.text_input("Enter URL to check:", "https://www.profoundproperties.com/")
+    url_found = False
     
     if st.button("Start Checking"):
         st.write("Fetching Sitemap URLs... Please wait.")
         urls = fetch_sitemap_urls(sitemap_url)
+
+        for i in urls:
+            if i == check_url:
+                st.write(f"URL {check_url} found in the sitemap.")
+                url_found = True
+                break
+        if not url_found:
+            st.error(f"URL {check_url} not found in the sitemap.")
+            return
         
         if not urls:
             st.error("No URLs found in the sitemap.")
