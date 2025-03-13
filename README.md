@@ -45,6 +45,6 @@ pip install streamlit httpx pandas selectolax lxml
 - The app follows redirects automatically when fetching pages.
 
 ## Author
-Developed by ChintanDiwkar
+Developed by ChintanDiwakar
 
 
