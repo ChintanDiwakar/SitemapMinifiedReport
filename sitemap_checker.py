@@ -85,12 +85,6 @@ async def process_urls_in_batches(urls, batch_size=100, max_concurrent=50):
     
     return results
 
-def run_async_task(async_func, *args):
-    """Run an async function inside Streamlit's event loop."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    return loop.run_until_complete(async_func(*args))
-
 def main():
     st.title("Fast Sitemap Checker")
 
@@ -106,8 +100,7 @@ def main():
 
         if st.button("Search in Sitemap"):
             with st.spinner("Fetching Sitemap URLs..."):
-                loop = asyncio.get_running_loop()
-                urls = loop.run_until_complete(fetch_sitemap_urls(sitemap_url))
+                urls = asyncio.run(fetch_sitemap_urls(sitemap_url))  # ✅ Corrected async handling
 
                 if not urls:
                     st.error("No URLs found in the sitemap.")
@@ -129,8 +122,7 @@ def main():
 
         if st.button("Start Checking All URLs"):
             with st.spinner("Fetching Sitemap URLs..."):
-                loop = asyncio.get_running_loop()
-                urls = loop.run_until_complete(fetch_sitemap_urls(sitemap_url))
+                urls = asyncio.run(fetch_sitemap_urls(sitemap_url))  # ✅ Corrected async handling
 
                 if not urls:
                     st.error("No URLs found in the sitemap.")
@@ -139,7 +131,7 @@ def main():
                 st.info(f"Found {len(urls)} URLs (excluding locales) in the sitemap.")
                 st.info("🚀 Starting URL status check...")
 
-                results = loop.run_until_complete(process_urls_in_batches(urls, batch_size, max_concurrent))
+                results = asyncio.run(process_urls_in_batches(urls, batch_size, max_concurrent))  # ✅ Corrected async handling
 
                 df = pd.DataFrame(results, columns=["URL", "Status Code", "Meta Title", "Meta Description", "Site Name"])
 
