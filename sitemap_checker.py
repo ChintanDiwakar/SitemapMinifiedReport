@@ -5,12 +5,12 @@ from selectolax.parser import HTMLParser
 import xml.etree.ElementTree as ET
 import asyncio
 import time
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 
+# Define locale patterns to ignore
+LOCALE_PATHS = ["/ru/", "/zh-cn/", "/de/", "/fr/", "/ar/"]
 
 async def fetch_sitemap_urls(sitemap_url):
-    """Fetch and parse XML sitemap to extract all URLs asynchronously."""
+    """Fetch and parse XML sitemap to extract all URLs asynchronously, ignoring locale-specific URLs."""
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(sitemap_url, timeout=30, follow_redirects=True)
@@ -22,34 +22,40 @@ async def fetch_sitemap_urls(sitemap_url):
             namespaces = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
             
             urls = [elem.text for elem in root.findall('.//ns:loc', namespaces)]
-            return urls
+            
+            # Filter out locale-specific URLs
+            filtered_urls = [url for url in urls if not any(locale in url for locale in LOCALE_PATHS)]
+            return filtered_urls
     except Exception as e:
         st.error(f"Error fetching sitemap: {e}")
         return []
 
+async def fetch_url_details(url, client, retries=3):
+    """Fetch URL status code, meta title, and description asynchronously with retries."""
+    for attempt in range(retries):
+        try:
+            response = await client.get(url, timeout=10, follow_redirects=True)
+            if response.status_code != 200:
+                return url, response.status_code, "Error", "Failed to load", "N/A"
+            
+            html = HTMLParser(response.text)
+            title = html.css_first("title").text(strip=True) if html.css_first("title") else "N/A"
+            meta_desc = html.css_first("meta[name='description']") 
+            description = meta_desc.attrs.get("content", "N/A") if meta_desc else "N/A"
+            site_name = html.css_first("meta[property='og:site_name']")
+            site_name = site_name.attrs.get("content", "N/A") if site_name else "N/A"
+            
+            return url, response.status_code, title, description, site_name
 
-async def fetch_url_details(url, client):
-    """Fetch URL status code, meta title, and description asynchronously."""
-    try:
-        response = await client.get(url, timeout=10, follow_redirects=True)
-        status_code = response.status_code
-        html = HTMLParser(response.text)
-        
-        title = html.css_first("title").text(strip=True) if html.css_first("title") else "N/A"
-        meta_desc = html.css_first("meta[name='description']") 
-        description = meta_desc.attrs.get("content", "N/A") if meta_desc else "N/A"
-        site_name = html.css_first("meta[property='og:site_name']")
-        site_name = site_name.attrs.get("content", "N/A") if site_name else "N/A"
-        
-        return url, status_code, title, description, site_name
-    except Exception as e:
-        return url, "Failed", f"Error: {str(e)[:50]}...", "N/A", "N/A"
-
+        except httpx.RequestError as e:
+            if attempt < retries - 1:
+                await asyncio.sleep(2)  # Wait before retrying
+            else:
+                return url, "Failed", f"Error: {str(e)[:50]}...", "N/A", "N/A"
 
 async def check_specific_url(check_url, urls):
     """Check if a specific URL exists in the sitemap."""
     return check_url in urls
-
 
 async def process_urls_in_batches(urls, batch_size=100, max_concurrent=50):
     """Process URLs in batches with a limit on concurrent requests."""
@@ -61,7 +67,6 @@ async def process_urls_in_batches(urls, batch_size=100, max_concurrent=50):
     eta_text = st.empty()
     start_time = time.time()
     
-    # Process in batches to avoid memory issues
     for batch_start in range(0, total_urls, batch_size):
         batch_end = min(batch_start + batch_size, total_urls)
         batch = urls[batch_start:batch_end]
@@ -71,12 +76,10 @@ async def process_urls_in_batches(urls, batch_size=100, max_concurrent=50):
             batch_results = await asyncio.gather(*tasks)
             results.extend(batch_results)
         
-        # Update progress
         completed = batch_end
         progress = completed / total_urls
         progress_bar.progress(progress)
         
-        # Calculate ETA
         elapsed_time = time.time() - start_time
         urls_per_second = completed / elapsed_time if elapsed_time > 0 else 0
         remaining_urls = total_urls - completed
@@ -85,10 +88,9 @@ async def process_urls_in_batches(urls, batch_size=100, max_concurrent=50):
         eta_minutes, eta_seconds = divmod(int(remaining_seconds), 60)
         
         status_text.write(f"Processed {completed}/{total_urls} URLs")
-        eta_text.write(f"⏳ Estimated Time Left: {eta_minutes}m {eta_seconds}s | ✅ Completed: {completed} | ❌ Pending: {remaining_urls} | Speed: {urls_per_second:.1f} URLs/sec")
+        eta_text.write(f"⏳ ETA: {eta_minutes}m {eta_seconds}s | ✅ Completed: {completed} | ❌ Pending: {remaining_urls} | Speed: {urls_per_second:.1f} URLs/sec")
     
     return results
-
 
 def main():
     st.title("Fast Sitemap Status Checker")
@@ -104,16 +106,16 @@ def main():
     
     if st.button("Start Checking"):
         with st.spinner("Fetching Sitemap URLs..."):
-            urls = asyncio.run(fetch_sitemap_urls(sitemap_url))
+            task = asyncio.create_task(fetch_sitemap_urls(sitemap_url))
+            urls = asyncio.run(task)  # Corrected Streamlit async handling
             
             if not urls:
                 st.error("No URLs found in the sitemap.")
                 return
             
             total_urls = len(urls)
-            st.info(f"Found {total_urls} URLs in the sitemap.")
+            st.info(f"Found {total_urls} URLs (excluding locales) in the sitemap.")
             
-            # Check if the specific URL exists in the sitemap
             url_found = asyncio.run(check_specific_url(check_url, urls))
             if url_found:
                 st.success(f"URL {check_url} found in the sitemap.")
@@ -124,24 +126,16 @@ def main():
         
         st.info("Starting URL status check... This will be much faster than sequential processing!")
         
-        # Process URLs in batches asynchronously
         results = asyncio.run(process_urls_in_batches(urls, batch_size, max_concurrent))
         
-        # Convert to DataFrame
         df = pd.DataFrame(results, columns=["URL", "Status Code", "Meta Title", "Meta Description", "Site Name"])
         
-        # Display DataFrame
-        st.dataframe(df)
+        status_filter = st.multiselect("Filter by Status Code:", df["Status Code"].unique(), default=[200, 404])
+        filtered_df = df[df["Status Code"].isin(status_filter)]
+        st.dataframe(filtered_df)
         
-        # Download button
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            "Download CSV",
-            csv,
-            "sitemap_report.csv",
-            "text/csv",
-            key="download-csv"
-        )
+        csv = filtered_df.to_csv(index=False).encode('utf-8')
+        st.download_button("Download CSV", csv, "sitemap_report.csv", "text/csv", key="download-csv")
 
 if __name__ == "__main__":
     main()
