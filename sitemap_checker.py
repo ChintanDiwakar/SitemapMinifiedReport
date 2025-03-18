@@ -69,57 +69,61 @@ def run_async_task(async_func, *args):
     return loop.run_until_complete(async_func(*args))
 
 def main():
-    st.title("Fast Sitemap Status Checker")
-    
+    st.title("Fast Sitemap Checker")
+
+    # Sidebar for navigation
+    option = st.sidebar.radio("Select Functionality", ["🔍 Search URL in Sitemap", "✅ Check All URLs"])
+
     sitemap_url = st.text_input("Enter Sitemap URL:", "https://www.profoundproperties.com/sitemap.xml")
-    check_url = st.text_input("Enter URL to check:", "https://www.profoundproperties.com/")
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        batch_size = st.number_input("Batch Size", min_value=10, max_value=500, value=100)
-    with col2:
-        max_concurrent = st.number_input("Max Concurrent Requests", min_value=10, max_value=100, value=50)
 
-    if "continue_checking" not in st.session_state:
-        st.session_state.continue_checking = False  # Default state for checkbox
+    if option == "🔍 Search URL in Sitemap":
+        st.subheader("🔍 Search for a Specific URL in the Sitemap")
 
-    if st.button("Start Checking"):
-        with st.spinner("Fetching Sitemap URLs..."):
-            urls = run_async_task(fetch_sitemap_urls, sitemap_url)
-            
-            if not urls:
-                st.error("No URLs found in the sitemap.")
-                return
-            
-            total_urls = len(urls)
-            st.info(f"Found {total_urls} URLs (excluding locales) in the sitemap.")
-            
-            url_found = check_url in urls
-            if url_found:
-                st.success(f"✅ URL {check_url} **exists** in the sitemap.")
-            else:
-                st.error(f"❌ URL {check_url} **not found** in the sitemap.")
-                
-                # Checkbox to allow users to continue processing all URLs
-                st.session_state.continue_checking = st.checkbox("Continue checking all URLs anyway")
+        check_url = st.text_input("Enter URL to search:", "https://www.profoundproperties.com/")
 
-                # If checkbox is not selected, stop execution
-                if not st.session_state.continue_checking:
-                    st.warning("Checking stopped. Please check your sitemap URL or enable the checkbox to continue.")
+        if st.button("Search in Sitemap"):
+            with st.spinner("Fetching Sitemap URLs..."):
+                urls = run_async_task(fetch_sitemap_urls, sitemap_url)
+
+                if not urls:
+                    st.error("No URLs found in the sitemap.")
                     return
 
-        st.info("🚀 Starting URL status check...")
-        
-        results = run_async_task(process_urls_in_batches, urls, batch_size, max_concurrent)
-        
-        df = pd.DataFrame(results, columns=["URL", "Status Code", "Meta Title", "Meta Description", "Site Name"])
-        
-        status_filter = st.multiselect("Filter by Status Code:", df["Status Code"].unique(), default=[200, 404])
-        filtered_df = df[df["Status Code"].isin(status_filter)]
-        st.dataframe(filtered_df)
-        
-        csv = filtered_df.to_csv(index=False).encode('utf-8')
-        st.download_button("Download CSV", csv, "sitemap_report.csv", "text/csv", key="download-csv")
+                if check_url in urls:
+                    st.success(f"✅ URL {check_url} **exists** in the sitemap.")
+                else:
+                    st.error(f"❌ URL {check_url} **not found** in the sitemap.")
+
+    elif option == "✅ Check All URLs":
+        st.subheader("✅ Check the Status of All URLs in Sitemap")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            batch_size = st.number_input("Batch Size", min_value=10, max_value=500, value=100)
+        with col2:
+            max_concurrent = st.number_input("Max Concurrent Requests", min_value=10, max_value=100, value=50)
+
+        if st.button("Start Checking All URLs"):
+            with st.spinner("Fetching Sitemap URLs..."):
+                urls = run_async_task(fetch_sitemap_urls, sitemap_url)
+
+                if not urls:
+                    st.error("No URLs found in the sitemap.")
+                    return
+
+                st.info(f"Found {len(urls)} URLs (excluding locales) in the sitemap.")
+                st.info("🚀 Starting URL status check...")
+
+                results = run_async_task(process_urls_in_batches, urls, batch_size, max_concurrent)
+
+                df = pd.DataFrame(results, columns=["URL", "Status Code", "Meta Title", "Meta Description", "Site Name"])
+
+                status_filter = st.multiselect("Filter by Status Code:", df["Status Code"].unique(), default=[200, 404])
+                filtered_df = df[df["Status Code"].isin(status_filter)]
+                st.dataframe(filtered_df)
+
+                csv = filtered_df.to_csv(index=False).encode('utf-8')
+                st.download_button("Download CSV", csv, "sitemap_report.csv", "text/csv", key="download-csv")
 
 if __name__ == "__main__":
     main()
