@@ -27,6 +27,29 @@ async def fetch_sitemap_urls(sitemap_url):
         st.error(f"Error fetching sitemap: {e}")
         return []
 
+async def fetch_url_details(url, client, retries=3):
+    """Fetch URL status code, meta title, and description asynchronously with retries."""
+    for attempt in range(retries):
+        try:
+            response = await client.get(url, timeout=10, follow_redirects=True)
+            if response.status_code != 200:
+                return url, response.status_code, "Error", "Failed to load", "N/A"
+            
+            html = HTMLParser(response.text)
+            title = html.css_first("title").text(strip=True) if html.css_first("title") else "N/A"
+            meta_desc = html.css_first("meta[name='description']")
+            description = meta_desc.attrs.get("content", "N/A") if meta_desc else "N/A"
+            site_name = html.css_first("meta[property='og:site_name']")
+            site_name = site_name.attrs.get("content", "N/A") if site_name else "N/A"
+            
+            return url, response.status_code, title, description, site_name
+
+        except httpx.RequestError as e:
+            if attempt < retries - 1:
+                await asyncio.sleep(2)
+            else:
+                return url, "Failed", f"Error: {str(e)[:50]}...", "N/A", "N/A"
+
 async def process_urls_in_batches(urls, batch_size=100, max_concurrent=50):
     """Process URLs in batches asynchronously."""
     results = []
@@ -83,7 +106,8 @@ def main():
 
         if st.button("Search in Sitemap"):
             with st.spinner("Fetching Sitemap URLs..."):
-                urls = run_async_task(fetch_sitemap_urls, sitemap_url)
+                loop = asyncio.get_running_loop()
+                urls = loop.run_until_complete(fetch_sitemap_urls(sitemap_url))
 
                 if not urls:
                     st.error("No URLs found in the sitemap.")
@@ -105,7 +129,8 @@ def main():
 
         if st.button("Start Checking All URLs"):
             with st.spinner("Fetching Sitemap URLs..."):
-                urls = run_async_task(fetch_sitemap_urls, sitemap_url)
+                loop = asyncio.get_running_loop()
+                urls = loop.run_until_complete(fetch_sitemap_urls(sitemap_url))
 
                 if not urls:
                     st.error("No URLs found in the sitemap.")
@@ -114,7 +139,7 @@ def main():
                 st.info(f"Found {len(urls)} URLs (excluding locales) in the sitemap.")
                 st.info("🚀 Starting URL status check...")
 
-                results = run_async_task(process_urls_in_batches, urls, batch_size, max_concurrent)
+                results = loop.run_until_complete(process_urls_in_batches(urls, batch_size, max_concurrent))
 
                 df = pd.DataFrame(results, columns=["URL", "Status Code", "Meta Title", "Meta Description", "Site Name"])
 
