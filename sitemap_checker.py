@@ -27,29 +27,6 @@ async def fetch_sitemap_urls(sitemap_url):
         st.error(f"Error fetching sitemap: {e}")
         return []
 
-async def fetch_url_details(url, client, retries=3):
-    """Fetch URL status code, meta title, and description asynchronously with retries."""
-    for attempt in range(retries):
-        try:
-            response = await client.get(url, timeout=10, follow_redirects=True)
-            if response.status_code != 200:
-                return url, response.status_code, "Error", "Failed to load", "N/A"
-            
-            html = HTMLParser(response.text)
-            title = html.css_first("title").text(strip=True) if html.css_first("title") else "N/A"
-            meta_desc = html.css_first("meta[name='description']")
-            description = meta_desc.attrs.get("content", "N/A") if meta_desc else "N/A"
-            site_name = html.css_first("meta[property='og:site_name']")
-            site_name = site_name.attrs.get("content", "N/A") if site_name else "N/A"
-            
-            return url, response.status_code, title, description, site_name
-
-        except httpx.RequestError as e:
-            if attempt < retries - 1:
-                await asyncio.sleep(2)
-            else:
-                return url, "Failed", f"Error: {str(e)[:50]}...", "N/A", "N/A"
-
 async def process_urls_in_batches(urls, batch_size=100, max_concurrent=50):
     """Process URLs in batches asynchronously."""
     results = []
@@ -102,7 +79,10 @@ def main():
         batch_size = st.number_input("Batch Size", min_value=10, max_value=500, value=100)
     with col2:
         max_concurrent = st.number_input("Max Concurrent Requests", min_value=10, max_value=100, value=50)
-    
+
+    if "continue_checking" not in st.session_state:
+        st.session_state.continue_checking = False  # Default state for checkbox
+
     if st.button("Start Checking"):
         with st.spinner("Fetching Sitemap URLs..."):
             urls = run_async_task(fetch_sitemap_urls, sitemap_url)
@@ -116,13 +96,19 @@ def main():
             
             url_found = check_url in urls
             if url_found:
-                st.success(f"URL {check_url} found in the sitemap.")
+                st.success(f"✅ URL {check_url} **exists** in the sitemap.")
             else:
-                st.error(f"URL {check_url} not found in the sitemap.")
-                if not st.checkbox("Continue checking all URLs anyway"):
+                st.error(f"❌ URL {check_url} **not found** in the sitemap.")
+                
+                # Checkbox to allow users to continue processing all URLs
+                st.session_state.continue_checking = st.checkbox("Continue checking all URLs anyway")
+
+                # If checkbox is not selected, stop execution
+                if not st.session_state.continue_checking:
+                    st.warning("Checking stopped. Please check your sitemap URL or enable the checkbox to continue.")
                     return
-        
-        st.info("Starting URL status check... This will be much faster than sequential processing!")
+
+        st.info("🚀 Starting URL status check...")
         
         results = run_async_task(process_urls_in_batches, urls, batch_size, max_concurrent)
         
