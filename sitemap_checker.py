@@ -178,7 +178,7 @@ async def analyze_single_url(url):
     analysis_start = time.time()
     
     # 1. Extract all meta details and measure load time
-    st.write("📋 Extracting meta tags and measuring load time...")
+    st.write(f"📋 Extracting meta tags for {url}...")
     response, desktop_load_time = await fetch_url_with_timing(url)
     results["desktop_load_time"] = desktop_load_time
     
@@ -213,7 +213,6 @@ async def analyze_single_url(url):
         results["meta_tags"] = []
     
     # 2. Generate QR codes for easy access
-    st.write("🔎 Generating QR codes...")
     results["url_qr_code"] = generate_qr_code(url)
     
     # 3. Extract additional device-specific information if available
@@ -271,6 +270,110 @@ def display_url_analysis(url, results):
     else:
         st.warning("No meta tags found")
 
+async def compare_multiple_urls(urls):
+    """Compare multiple URLs (up to 5) for their meta details."""
+    if not urls:
+        st.error("No URLs provided for comparison.")
+        return
+    
+    # Create a progress container
+    progress_container = st.empty()
+    progress_container.info(f"Starting analysis of {len(urls)} URLs...")
+    
+    # Analyze each URL
+    all_results = {}
+    
+    for i, url in enumerate(urls):
+        progress_container.info(f"Analyzing URL {i+1}/{len(urls)}: {url}")
+        results = await analyze_single_url(url)
+        all_results[url] = results
+    
+    progress_container.success("All URLs analyzed successfully!")
+    
+    # Process the meta tags for comparison
+    meta_comparison = {}
+    common_meta_tags = ["title", "description", "keywords", "viewport", "robots", "canonical"]
+    
+    # First, collect title and other important meta tags
+    for url, results in all_results.items():
+        url_meta = {"load_time": f"{results['desktop_load_time']:.2f}s"}
+        
+        # Initialize with empty values
+        for tag in common_meta_tags:
+            url_meta[tag] = "Not found"
+        
+        # Fill in values from meta tags
+        for meta in results["meta_tags"]:
+            if "element" in meta and meta["element"] == "title":
+                url_meta["title"] = meta.get("content", "")
+            elif "name" in meta and meta["name"] in common_meta_tags:
+                url_meta[meta["name"]] = meta.get("content", "")
+            elif "property" in meta and meta["property"] in common_meta_tags:
+                url_meta[meta["property"]] = meta.get("content", "")
+            
+            # Handle canonical links separately
+            if "rel" in meta and meta.get("rel") == "canonical" and "href" in meta:
+                url_meta["canonical"] = meta["href"]
+        
+        meta_comparison[url] = url_meta
+    
+    # Create a comparison table
+    comparison_df = pd.DataFrame.from_dict(meta_comparison, orient='index')
+    
+    # Return all results for detailed view
+    return comparison_df, all_results
+
+def display_comparison_results(comparison_df, all_results):
+    """Display the comparison results."""
+    st.subheader("📊 URL Comparison Results")
+    
+    # Display the comparison table
+    st.write("### Meta Tag Comparison")
+    st.dataframe(comparison_df)
+    
+    # Allow downloading comparison as CSV
+    csv = comparison_df.to_csv(index=True).encode('utf-8')
+    st.download_button("Download Comparison CSV", csv, "url_comparison.csv", "text/csv")
+    
+    # Display load time comparison
+    st.write("### ⏱️ Load Time Comparison")
+    
+    load_times = {}
+    for url, results in all_results.items():
+        load_times[url] = results["desktop_load_time"]
+    
+    # Sort by load time
+    sorted_urls = sorted(load_times.items(), key=lambda x: x[1])
+    
+    # Create a bar chart
+    load_time_df = pd.DataFrame({
+        'URL': [url for url, _ in sorted_urls],
+        'Load Time (s)': [time for _, time in sorted_urls]
+    })
+    
+    st.bar_chart(load_time_df.set_index('URL'))
+    
+    # Display detailed results for each URL
+    st.write("### 🔍 Detailed Results")
+    
+    tabs = st.tabs([f"URL {i+1}" for i in range(len(all_results))])
+    
+    for i, (tab, (url, results)) in enumerate(zip(tabs, all_results.items())):
+        with tab:
+            st.subheader(f"URL {i+1}: {url}")
+            
+            # Show QR code
+            st.write("#### QR Code")
+            st.image(f"data:image/png;base64,{results['url_qr_code']}", width=200)
+            
+            # Show meta tags
+            st.write("#### Meta Tags")
+            if results["meta_tags"]:
+                meta_df = pd.DataFrame(results["meta_tags"])
+                st.dataframe(meta_df)
+            else:
+                st.warning("No meta tags found")
+
 def main():
     st.title("Fast Sitemap Checker")
 
@@ -278,7 +381,8 @@ def main():
     option = st.sidebar.radio("Select Functionality", [
         "🔍 Search URL in Sitemap", 
         "✅ Check All URLs", 
-        "🔎 Single URL Analysis"
+        "🔎 Single URL Analysis",
+        "🔄 Compare URLs"
     ])
 
     if option in ["🔍 Search URL in Sitemap", "✅ Check All URLs"]:
@@ -386,6 +490,33 @@ def main():
                 
                 # Display the results
                 display_url_analysis(analyze_url, results)
+    
+    elif option == "🔄 Compare URLs":
+        st.subheader("🔄 Compare Multiple URLs")
+        st.write("Enter up to 5 URLs to compare their meta tags, load times, and other details")
+        
+        # Create input fields for up to 5 URLs
+        urls = []
+        for i in range(5):
+            url = st.text_input(f"URL {i+1}:", key=f"compare_url_{i}")
+            if url:
+                urls.append(url)
+        
+        if st.button("Compare URLs"):
+            if not urls:
+                st.error("Please enter at least one URL to compare")
+                return
+            
+            if any(not url.startswith(("http://", "https://")) for url in urls):
+                st.error("All URLs must start with http:// or https://")
+                return
+            
+            with st.spinner(f"Comparing {len(urls)} URLs... This may take a few minutes."):
+                # Run the comparison analysis
+                comparison_df, all_results = asyncio.run(compare_multiple_urls(urls))
+                
+                # Display the comparison results
+                display_comparison_results(comparison_df, all_results)
 
 if __name__ == "__main__":
     main()
