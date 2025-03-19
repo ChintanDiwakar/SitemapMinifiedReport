@@ -9,13 +9,12 @@ import re
 import base64
 from PIL import Image
 import io
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 import tempfile
 import os
 from datetime import datetime
+
+# Import playwright instead of selenium
+from playwright.async_api import async_playwright
 
 LOCALE_PATHS = ["/ru/", "/zh-cn/", "/de/", "/fr/", "/ar/"]
 
@@ -109,90 +108,75 @@ def filter_urls_by_regex(urls, regex_pattern):
         st.error(f"Invalid regex pattern: {e}")
         return urls
 
-def setup_webdriver(device="desktop"):
-    """Set up and return a configured webdriver for screenshots."""
-    options = Options()
-    options.add_argument("--headless")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    
-    # Add user agent for Googlebot
-    if device == "googlebot":
-        options.add_argument("user-agent=Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)")
-    # Add mobile emulation for mobile device
-    elif device == "mobile":
-        mobile_emulation = {
-            "deviceMetrics": {"width": 360, "height": 640, "pixelRatio": 3.0},
-            "userAgent": "Mozilla/5.0 (Linux; Android 10; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.132 Mobile Safari/537.36"
-        }
-        options.add_experimental_option("mobileEmulation", mobile_emulation)
-    
-    # Install webdriver
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
-    
-    # Set window size for desktop
-    if device == "desktop" or device == "googlebot":
-        driver.set_window_size(1366, 768)
-    
-    return driver
-
-def take_screenshot(url, device="desktop"):
-    """Take a screenshot of the URL with specified device emulation."""
+async def take_screenshot_with_playwright(url, device_type="desktop"):
+    """Take a screenshot of a URL using Playwright."""
     try:
-        driver = setup_webdriver(device)
-        
-        start_time = time.time()
-        driver.get(url)
-        load_time = time.time() - start_time
-        
-        # Wait for page to fully load
-        time.sleep(2)
-        
-        # Create a temporary file to save the screenshot
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-            driver.save_screenshot(tmp.name)
-            tmp_name = tmp.name
-        
-        # Read the screenshot and convert to base64
-        with open(tmp_name, "rb") as img_file:
-            img_data = base64.b64encode(img_file.read()).decode()
-        
-        # Clean up the temporary file
-        os.unlink(tmp_name)
-        
-        # Close the driver
-        driver.quit()
-        
-        return img_data, load_time
+        async with async_playwright() as p:
+            # Set up browser
+            browser = await p.chromium.launch(headless=True)
+            
+            # Configure device context
+            if device_type == "desktop":
+                context = await browser.new_context(
+                    viewport={'width': 1366, 'height': 768}
+                )
+            elif device_type == "mobile":
+                # Use a predefined mobile device
+                device = p.devices['Pixel 2']
+                context = await browser.new_context(**device)
+            elif device_type == "googlebot":
+                context = await browser.new_context(
+                    viewport={'width': 1366, 'height': 768},
+                    user_agent="Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+                )
+            
+            # Create a new page and navigate to the URL
+            page = await context.new_page()
+            
+            # Measure load time
+            start_time = time.time()
+            await page.goto(url, wait_until="networkidle", timeout=60000)
+            load_time = time.time() - start_time
+            
+            # Take screenshot
+            screenshot_bytes = await page.screenshot()
+            
+            # Close browser
+            await browser.close()
+            
+            # Convert to base64
+            img_base64 = base64.b64encode(screenshot_bytes).decode()
+            
+            return img_base64, load_time
     except Exception as e:
-        st.error(f"Error taking screenshot: {e}")
+        st.error(f"Error taking screenshot with Playwright: {e}")
         return None, 0
 
-def extract_all_meta_tags(url):
+async def extract_all_meta_tags(url):
     """Extract all meta tags from a URL."""
     try:
-        response = httpx.get(url, timeout=10, follow_redirects=True)
-        if response.status_code != 200:
-            return []
-        
-        html = HTMLParser(response.text)
-        meta_tags = html.css("meta")
-        
-        meta_info = []
-        for tag in meta_tags:
-            attributes = tag.attributes
-            meta_data = {}
-            for attr, value in attributes.items():
-                meta_data[attr] = value
-            meta_info.append(meta_data)
-        
-        return meta_info
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=10, follow_redirects=True)
+            if response.status_code != 200:
+                return []
+            
+            html = HTMLParser(response.text)
+            meta_tags = html.css("meta")
+            
+            meta_info = []
+            for tag in meta_tags:
+                attributes = tag.attributes
+                meta_data = {}
+                for attr, value in attributes.items():
+                    meta_data[attr] = value
+                meta_info.append(meta_data)
+            
+            return meta_info
     except Exception as e:
         st.error(f"Error extracting meta tags: {e}")
         return []
 
-def analyze_single_url(url):
+async def analyze_single_url(url):
     """Analyze a single URL and gather comprehensive details."""
     results = {}
     
@@ -201,24 +185,24 @@ def analyze_single_url(url):
     
     # 1. Extract all meta details
     st.write("📋 Extracting meta tags...")
-    meta_tags = extract_all_meta_tags(url)
+    meta_tags = await extract_all_meta_tags(url)
     results["meta_tags"] = meta_tags
     
     # 2. Take desktop screenshot
     st.write("🖥️ Taking desktop screenshot...")
-    desktop_img, desktop_load_time = take_screenshot(url, "desktop")
+    desktop_img, desktop_load_time = await take_screenshot_with_playwright(url, "desktop")
     results["desktop_screenshot"] = desktop_img
     results["desktop_load_time"] = desktop_load_time
     
     # 3. Take mobile screenshot
     st.write("📱 Taking mobile screenshot...")
-    mobile_img, mobile_load_time = take_screenshot(url, "mobile")
+    mobile_img, mobile_load_time = await take_screenshot_with_playwright(url, "mobile")
     results["mobile_screenshot"] = mobile_img
     results["mobile_load_time"] = mobile_load_time
     
     # 4. Take Googlebot screenshot
     st.write("🤖 Taking Googlebot screenshot...")
-    googlebot_img, googlebot_load_time = take_screenshot(url, "googlebot")
+    googlebot_img, googlebot_load_time = await take_screenshot_with_playwright(url, "googlebot")
     results["googlebot_screenshot"] = googlebot_img
     results["googlebot_load_time"] = googlebot_load_time
     
@@ -388,7 +372,7 @@ def main():
             
             with st.spinner(f"Analyzing {analyze_url}... This may take a minute."):
                 # Run the comprehensive analysis
-                results = analyze_single_url(analyze_url)
+                results = asyncio.run(analyze_single_url(analyze_url))
                 
                 # Display the results
                 display_url_analysis(analyze_url, results)
