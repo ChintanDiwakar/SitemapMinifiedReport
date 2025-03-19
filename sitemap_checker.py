@@ -9,11 +9,10 @@ import re
 import base64
 from datetime import datetime
 import urllib.parse
+import qrcode
+from io import BytesIO
 
 LOCALE_PATHS = ["/ru/", "/zh-cn/", "/de/", "/fr/", "/ar/"]
-
-# Use a screenshot API service
-SCREENSHOT_API_BASE = "https://cdn.screenshotapi.net/screenshot"
 
 async def fetch_sitemap_urls(sitemap_url):
     """Fetch and parse XML sitemap to extract all URLs asynchronously, ignoring locale-specific URLs."""
@@ -105,34 +104,22 @@ def filter_urls_by_regex(urls, regex_pattern):
         st.error(f"Invalid regex pattern: {e}")
         return urls
 
-async def get_screenshot_url(url, device_type="desktop"):
-    """Generate a URL for a screenshot using an external service."""
-    encoded_url = urllib.parse.quote_plus(url)
+def generate_qr_code(url):
+    """Generate a QR code for the URL."""
+    qr = qrcode.QRCode(
+        version=1,
+        error_correction=qrcode.constants.ERROR_CORRECT_L,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(url)
+    qr.make(fit=True)
     
-    # Configure device parameters
-    if device_type == "desktop":
-        width = 1366
-        height = 768
-        user_agent = "desktop"
-    elif device_type == "mobile":
-        width = 375
-        height = 667
-        user_agent = "mobile"
-    elif device_type == "googlebot":
-        width = 1366
-        height = 768
-        user_agent = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
-    
-    # Create screenshot URL - this example uses screenshotapi.net's free service
-    # You might need to adjust this based on the service you choose
-    screenshot_url = f"{SCREENSHOT_API_BASE}?token=YWTDQDPEKUF4PE9RTDYRM6UPP2EFYF2T&url={encoded_url}&width={width}&height={height}&output=image&file_type=png&wait_for_event=load"
-    
-    if device_type == "mobile":
-        screenshot_url += "&device=mobile"
-    elif device_type == "googlebot":
-        screenshot_url += f"&user_agent={urllib.parse.quote_plus(user_agent)}"
-    
-    return screenshot_url
+    img = qr.make_image(fill_color="black", back_color="white")
+    buffered = BytesIO()
+    img.save(buffered)
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    return img_str
 
 async def fetch_url_with_timing(url):
     """Fetch URL and measure load time."""
@@ -225,14 +212,16 @@ async def analyze_single_url(url):
     else:
         results["meta_tags"] = []
     
-    # 2. Get screenshot URLs
-    st.write("🖥️ Generating screenshots...")
-    results["desktop_screenshot_url"] = await get_screenshot_url(url, "desktop")
-    results["mobile_screenshot_url"] = await get_screenshot_url(url, "mobile")
-    results["googlebot_screenshot_url"] = await get_screenshot_url(url, "googlebot")
+    # 2. Generate QR codes for easy access
+    st.write("🔎 Generating QR codes...")
+    results["url_qr_code"] = generate_qr_code(url)
     
-    # Simulate mobile and googlebot load times (we can't actually measure these without a browser)
-    # Typically mobile is slightly slower than desktop
+    # 3. Extract additional device-specific information if available
+    mobile_url = f"{url}?device=mobile"
+    results["mobile_url"] = mobile_url
+    results["mobile_qr_code"] = generate_qr_code(mobile_url)
+    
+    # Use estimated values for mobile/googlebot since we can't directly measure
     results["mobile_load_time"] = desktop_load_time * 1.2  # Estimate: mobile is ~20% slower
     results["googlebot_load_time"] = desktop_load_time * 0.9  # Estimate: googlebot might be a bit faster
     
@@ -257,21 +246,18 @@ def display_url_analysis(url, results):
     
     st.info(f"Total analysis completed in {results['total_analysis_time']:.2f} seconds")
     
-    # Display screenshots (using external service URLs)
-    st.write("### 📸 Screenshots")
-    tab1, tab2, tab3 = st.tabs(["Desktop", "Mobile", "Googlebot"])
+    # Display QR codes for easy access
+    st.write("### 📱 Quick Access QR Codes")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("Desktop View")
+        st.markdown(f"Scan to view: {url}")
+        st.image(f"data:image/png;base64,{results['url_qr_code']}", width=300)
     
-    with tab1:
-        st.markdown(f"[View Desktop Screenshot]({results['desktop_screenshot_url']})")
-        st.image(results['desktop_screenshot_url'], caption="Desktop View", use_column_width=True)
-    
-    with tab2:
-        st.markdown(f"[View Mobile Screenshot]({results['mobile_screenshot_url']})")
-        st.image(results['mobile_screenshot_url'], caption="Mobile View", use_column_width=True)
-    
-    with tab3:
-        st.markdown(f"[View Googlebot Screenshot]({results['googlebot_screenshot_url']})")
-        st.image(results['googlebot_screenshot_url'], caption="As seen by Googlebot", use_column_width=True)
+    with col2:
+        st.subheader("Mobile View")
+        st.markdown(f"Scan to view: {results['mobile_url']}")
+        st.image(f"data:image/png;base64,{results['mobile_qr_code']}", width=300)
     
     # Display meta tags
     st.write("### 🏷️ Meta Tags")
@@ -385,7 +371,7 @@ def main():
     
     elif option == "🔎 Single URL Analysis":
         st.subheader("🔎 Comprehensive Single URL Analysis")
-        st.write("Enter a URL to analyze its meta tags, view screenshots, and measure load times")
+        st.write("Enter a URL to analyze its meta tags, get QR codes for easy access, and measure load times")
         
         analyze_url = st.text_input("Enter URL to analyze:", "https://www.example.com/")
         
