@@ -6,3 +6,4 @@ lxml
 selenium
 webdriver_manager
 playwright
+qrcode
