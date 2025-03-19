@@ -11,6 +11,9 @@ from datetime import datetime
 import urllib.parse
 import qrcode
 from io import BytesIO
+import difflib
+import os
+from pathlib import Path
 
 LOCALE_PATHS = ["/ru/", "/zh-cn/", "/de/", "/fr/", "/ar/"]
 
@@ -56,54 +59,6 @@ async def fetch_url_details(url, client, retries=3):
             else:
                 return url, "Failed", f"Error: {str(e)[:50]}...", "N/A", "N/A"
 
-async def process_urls_in_batches(urls, batch_size=100, max_concurrent=50):
-    """Process URLs in batches asynchronously."""
-    results = []
-    total_urls = len(urls)
-    
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    eta_text = st.empty()
-    start_time = time.time()
-    
-    for batch_start in range(0, total_urls, batch_size):
-        batch_end = min(batch_start + batch_size, total_urls)
-        batch = urls[batch_start:batch_end]
-        
-        async with httpx.AsyncClient(limits=httpx.Limits(max_connections=max_concurrent)) as client:
-            tasks = [fetch_url_details(url, client) for url in batch]
-            batch_results = await asyncio.gather(*tasks)
-            results.extend(batch_results)
-        
-        completed = batch_end
-        progress = completed / total_urls
-        progress_bar.progress(progress)
-        
-        elapsed_time = time.time() - start_time
-        urls_per_second = completed / elapsed_time if elapsed_time > 0 else 0
-        remaining_urls = total_urls - completed
-        remaining_seconds = remaining_urls / urls_per_second if urls_per_second > 0 else 0
-        
-        eta_minutes, eta_seconds = divmod(int(remaining_seconds), 60)
-        
-        status_text.write(f"Processed {completed}/{total_urls} URLs")
-        eta_text.write(f"⏳ ETA: {eta_minutes}m {eta_seconds}s | ✅ Completed: {completed} | ❌ Pending: {remaining_urls} | Speed: {urls_per_second:.1f} URLs/sec")
-    
-    return results
-
-def filter_urls_by_regex(urls, regex_pattern):
-    """Filter URLs based on regex pattern."""
-    if not regex_pattern:
-        return urls
-    
-    try:
-        pattern = re.compile(regex_pattern)
-        filtered_urls = [url for url in urls if pattern.search(url)]
-        return filtered_urls
-    except re.error as e:
-        st.error(f"Invalid regex pattern: {e}")
-        return urls
-
 def generate_qr_code(url):
     """Generate a QR code for the URL."""
     qr = qrcode.QRCode(
@@ -121,402 +76,291 @@ def generate_qr_code(url):
     img_str = base64.b64encode(buffered.getvalue()).decode()
     return img_str
 
-async def fetch_url_with_timing(url):
-    """Fetch URL and measure load time."""
-    start_time = time.time()
+def scan_directory(directory_path):
+    """Scan a directory and return all files with their metadata."""
+    files = []
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, timeout=30, follow_redirects=True)
-            load_time = time.time() - start_time
-            return response, load_time
+        for root, _, filenames in os.walk(directory_path):
+            for filename in filenames:
+                file_path = os.path.join(root, filename)
+                file_info = {
+                    "path": file_path,
+                    "name": filename,
+                    "extension": os.path.splitext(filename)[1].lower(),
+                    "size": os.path.getsize(file_path),
+                    "modified": datetime.fromtimestamp(os.path.getmtime(file_path)).strftime('%Y-%m-%d %H:%M:%S'),
+                    "created": datetime.fromtimestamp(os.path.getctime(file_path)).strftime('%Y-%m-%d %H:%M:%S'),
+                }
+                files.append(file_info)
     except Exception as e:
-        load_time = time.time() - start_time
-        st.error(f"Error fetching URL: {e}")
-        return None, load_time
+        st.error(f"Error scanning directory: {e}")
+    return files
 
-async def extract_all_meta_tags(url):
-    """Extract all meta tags from a URL."""
+def find_similar_files(files, similarity_threshold=0.7):
+    """Find files with similar names."""
+    similar_groups = []
+    processed = set()
+    
+    for i, file1 in enumerate(files):
+        if file1["path"] in processed:
+            continue
+        
+        group = [file1]
+        processed.add(file1["path"])
+        
+        for j, file2 in enumerate(files):
+            if i == j or file2["path"] in processed:
+                continue
+            
+            # Compare filenames (without extension)
+            name1 = os.path.splitext(file1["name"])[0]
+            name2 = os.path.splitext(file2["name"])[0]
+            
+            similarity = difflib.SequenceMatcher(None, name1, name2).ratio()
+            
+            if similarity >= similarity_threshold:
+                group.append(file2)
+                processed.add(file2["path"])
+        
+        if len(group) > 1:
+            similar_groups.append(group)
+    
+    return similar_groups
+
+def compare_file_content(file1_path, file2_path):
+    """Compare the content of two files and return a diff."""
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, timeout=30, follow_redirects=True)
-            if response.status_code != 200:
-                return []
+        with open(file1_path, 'r', encoding='utf-8') as f1, open(file2_path, 'r', encoding='utf-8') as f2:
+            file1_lines = f1.readlines()
+            file2_lines = f2.readlines()
             
-            html = HTMLParser(response.text)
-            meta_tags = html.css("meta")
-            
-            meta_info = []
-            for tag in meta_tags:
-                attributes = tag.attributes
-                meta_data = {}
-                for attr, value in attributes.items():
-                    meta_data[attr] = value
-                meta_info.append(meta_data)
-            
-            # Also extract other important head elements
-            title = html.css_first("title")
-            if title:
-                meta_info.append({"element": "title", "content": title.text(strip=True)})
-                
-            links = html.css("link[rel]")
-            for link in links:
-                link_data = {"element": "link"}
-                for attr, value in link.attributes.items():
-                    link_data[attr] = value
-                meta_info.append(link_data)
-            
-            return meta_info
+        diff = list(difflib.unified_diff(
+            file1_lines, 
+            file2_lines,
+            fromfile=os.path.basename(file1_path),
+            tofile=os.path.basename(file2_path),
+            lineterm=''
+        ))
+        
+        return diff
+    except UnicodeDecodeError:
+        # If files are not text files
+        return ["Binary files cannot be compared line by line."]
     except Exception as e:
-        st.error(f"Error extracting meta tags: {e}")
-        return []
+        return [f"Error comparing files: {str(e)}"]
 
-async def analyze_single_url(url):
-    """Analyze a single URL and gather comprehensive details."""
-    results = {}
-    
-    # Start timing the overall analysis
-    analysis_start = time.time()
-    
-    # 1. Extract all meta details and measure load time
-    st.write(f"📋 Extracting meta tags for {url}...")
-    response, desktop_load_time = await fetch_url_with_timing(url)
-    results["desktop_load_time"] = desktop_load_time
-    
-    # Only proceed if we got a response
-    if response and response.status_code == 200:
-        # Extract meta tags from the response
-        html = HTMLParser(response.text)
-        meta_tags = html.css("meta")
-        
-        meta_info = []
-        for tag in meta_tags:
-            attributes = tag.attributes
-            meta_data = {}
-            for attr, value in attributes.items():
-                meta_data[attr] = value
-            meta_info.append(meta_data)
-        
-        # Also extract other important head elements
-        title = html.css_first("title")
-        if title:
-            meta_info.append({"element": "title", "content": title.text(strip=True)})
-            
-        links = html.css("link[rel]")
-        for link in links:
-            link_data = {"element": "link"}
-            for attr, value in link.attributes.items():
-                link_data[attr] = value
-            meta_info.append(link_data)
-        
-        results["meta_tags"] = meta_info
-    else:
-        results["meta_tags"] = []
-    
-    # 2. Generate QR codes for easy access
-    results["url_qr_code"] = generate_qr_code(url)
-    
-    # 3. Extract additional device-specific information if available
-    mobile_url = f"{url}?device=mobile"
-    results["mobile_url"] = mobile_url
-    results["mobile_qr_code"] = generate_qr_code(mobile_url)
-    
-    # Use estimated values for mobile/googlebot since we can't directly measure
-    results["mobile_load_time"] = desktop_load_time * 1.2  # Estimate: mobile is ~20% slower
-    results["googlebot_load_time"] = desktop_load_time * 0.9  # Estimate: googlebot might be a bit faster
-    
-    # Calculate overall analysis time
-    results["total_analysis_time"] = time.time() - analysis_start
-    
-    return results
+def read_file_preview(file_path, max_lines=20):
+    """Read a preview of the file content."""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = []
+            for i, line in enumerate(f):
+                if i >= max_lines:
+                    lines.append("...(more lines)...")
+                    break
+                lines.append(line)
+            return "".join(lines)
+    except UnicodeDecodeError:
+        return "Binary file - preview not available."
+    except Exception as e:
+        return f"Error reading file: {str(e)}"
 
-def display_url_analysis(url, results):
-    """Display the comprehensive URL analysis results."""
-    st.subheader(f"📊 Analysis Results for {url}")
+def compare_meta_properties(file_paths):
+    """Compare metadata properties of multiple files."""
+    meta_data = []
+    for path in file_paths:
+        file_info = Path(path)
+        stats = file_info.stat()
+        meta = {
+            "path": str(file_info),
+            "name": file_info.name,
+            "size": stats.st_size,
+            "modified": datetime.fromtimestamp(stats.st_mtime).strftime('%Y-%m-%d %H:%M:%S'),
+            "created": datetime.fromtimestamp(stats.st_ctime).strftime('%Y-%m-%d %H:%M:%S'),
+            "is_directory": file_info.is_dir(),
+            "extension": file_info.suffix,
+            "parent": str(file_info.parent),
+        }
+        meta_data.append(meta)
     
-    # Display load times
-    st.write("### ⏱️ Load Times")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Desktop Load Time", f"{results['desktop_load_time']:.2f}s")
-    with col2:
-        st.metric("Mobile Load Time (est.)", f"{results['mobile_load_time']:.2f}s")
-    with col3:
-        st.metric("Googlebot Load Time (est.)", f"{results['googlebot_load_time']:.2f}s")
-    
-    st.info(f"Total analysis completed in {results['total_analysis_time']:.2f} seconds")
-    
-    # Display QR codes for easy access
-    st.write("### 📱 Quick Access QR Codes")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Desktop View")
-        st.markdown(f"Scan to view: {url}")
-        st.image(f"data:image/png;base64,{results['url_qr_code']}", width=300)
-    
-    with col2:
-        st.subheader("Mobile View")
-        st.markdown(f"Scan to view: {results['mobile_url']}")
-        st.image(f"data:image/png;base64,{results['mobile_qr_code']}", width=300)
-    
-    # Display meta tags
-    st.write("### 🏷️ Meta Tags")
-    if results["meta_tags"]:
-        meta_df = pd.DataFrame(results["meta_tags"])
-        st.dataframe(meta_df)
-        
-        # Allow downloading meta tags as CSV
-        csv = meta_df.to_csv(index=False).encode('utf-8')
-        st.download_button("Download Meta Tags CSV", csv, f"meta_tags_{url.replace('://', '_').replace('/', '_')}.csv", "text/csv")
-    else:
-        st.warning("No meta tags found")
-
-async def compare_multiple_urls(urls):
-    """Compare multiple URLs (up to 5) for their meta details."""
-    if not urls:
-        st.error("No URLs provided for comparison.")
-        return
-    
-    # Create a progress container
-    progress_container = st.empty()
-    progress_container.info(f"Starting analysis of {len(urls)} URLs...")
-    
-    # Analyze each URL
-    all_results = {}
-    
-    for i, url in enumerate(urls):
-        progress_container.info(f"Analyzing URL {i+1}/{len(urls)}: {url}")
-        results = await analyze_single_url(url)
-        all_results[url] = results
-    
-    progress_container.success("All URLs analyzed successfully!")
-    
-    # Process the meta tags for comparison
-    meta_comparison = {}
-    common_meta_tags = ["title", "description", "keywords", "viewport", "robots", "canonical"]
-    
-    # First, collect title and other important meta tags
-    for url, results in all_results.items():
-        url_meta = {"load_time": f"{results['desktop_load_time']:.2f}s"}
-        
-        # Initialize with empty values
-        for tag in common_meta_tags:
-            url_meta[tag] = "Not found"
-        
-        # Fill in values from meta tags
-        for meta in results["meta_tags"]:
-            if "element" in meta and meta["element"] == "title":
-                url_meta["title"] = meta.get("content", "")
-            elif "name" in meta and meta["name"] in common_meta_tags:
-                url_meta[meta["name"]] = meta.get("content", "")
-            elif "property" in meta and meta["property"] in common_meta_tags:
-                url_meta[meta["property"]] = meta.get("content", "")
-            
-            # Handle canonical links separately
-            if "rel" in meta and meta.get("rel") == "canonical" and "href" in meta:
-                url_meta["canonical"] = meta["href"]
-        
-        meta_comparison[url] = url_meta
-    
-    # Create a comparison table
-    comparison_df = pd.DataFrame.from_dict(meta_comparison, orient='index')
-    
-    # Return all results for detailed view
-    return comparison_df, all_results
-
-def display_comparison_results(comparison_df, all_results):
-    """Display the comparison results."""
-    st.subheader("📊 URL Comparison Results")
-    
-    # Display the comparison table
-    st.write("### Meta Tag Comparison")
-    st.dataframe(comparison_df)
-    
-    # Allow downloading comparison as CSV
-    csv = comparison_df.to_csv(index=True).encode('utf-8')
-    st.download_button("Download Comparison CSV", csv, "url_comparison.csv", "text/csv")
-    
-    # Display load time comparison
-    st.write("### ⏱️ Load Time Comparison")
-    
-    load_times = {}
-    for url, results in all_results.items():
-        load_times[url] = results["desktop_load_time"]
-    
-    # Sort by load time
-    sorted_urls = sorted(load_times.items(), key=lambda x: x[1])
-    
-    # Create a bar chart
-    load_time_df = pd.DataFrame({
-        'URL': [url for url, _ in sorted_urls],
-        'Load Time (s)': [time for _, time in sorted_urls]
-    })
-    
-    st.bar_chart(load_time_df.set_index('URL'))
-    
-    # Display detailed results for each URL
-    st.write("### 🔍 Detailed Results")
-    
-    tabs = st.tabs([f"URL {i+1}" for i in range(len(all_results))])
-    
-    for i, (tab, (url, results)) in enumerate(zip(tabs, all_results.items())):
-        with tab:
-            st.subheader(f"URL {i+1}: {url}")
-            
-            # Show QR code
-            st.write("#### QR Code")
-            st.image(f"data:image/png;base64,{results['url_qr_code']}", width=200)
-            
-            # Show meta tags
-            st.write("#### Meta Tags")
-            if results["meta_tags"]:
-                meta_df = pd.DataFrame(results["meta_tags"])
-                st.dataframe(meta_df)
-            else:
-                st.warning("No meta tags found")
+    return pd.DataFrame(meta_data)
 
 def main():
-    st.title("Fast Sitemap Checker")
+    st.title("File Comparison Tool")
 
     # Sidebar for navigation
     option = st.sidebar.radio("Select Functionality", [
-        "🔍 Search URL in Sitemap", 
-        "✅ Check All URLs", 
-        "🔎 Single URL Analysis",
-        "🔄 Compare URLs"
+        "🔍 Find Similar Files",
+        "📊 Compare Files Side by Side",
+        "📡 Sitemap Checker"
     ])
 
-    if option in ["🔍 Search URL in Sitemap", "✅ Check All URLs"]:
-        sitemap_url = st.text_input("Enter Sitemap URL:", "https://www.profoundproperties.com/sitemap.xml")
+    if option == "🔍 Find Similar Files":
+        st.subheader("🔍 Find Files with Similar Names")
+        
+        directory_path = st.text_input("Enter Directory Path to Scan:", ".")
+        similarity_threshold = st.slider("Similarity Threshold", min_value=0.1, max_value=1.0, value=0.7, step=0.05)
+        
+        if st.button("Scan Directory"):
+            if not os.path.isdir(directory_path):
+                st.error(f"Invalid directory path: {directory_path}")
+                return
+            
+            with st.spinner("Scanning directory..."):
+                files = scan_directory(directory_path)
+                if not files:
+                    st.warning("No files found in the directory.")
+                    return
+                
+                st.success(f"Found {len(files)} files.")
+                
+                # Find similar files
+                similar_groups = find_similar_files(files, similarity_threshold)
+                
+                if not similar_groups:
+                    st.info("No similar files found with the current threshold.")
+                else:
+                    st.write(f"Found {len(similar_groups)} groups of similar files:")
+                    
+                    for i, group in enumerate(similar_groups):
+                        with st.expander(f"Group {i+1} ({len(group)} files)"):
+                            files_df = pd.DataFrame(group)
+                            st.dataframe(files_df[["name", "size", "modified", "path"]])
+                            
+                            if st.button(f"Compare Files in Group {i+1}", key=f"compare_group_{i}"):
+                                st.session_state.selected_files = [file["path"] for file in group]
+                                st.session_state.current_option = "📊 Compare Files Side by Side"
+                                st.experimental_rerun()
 
-    if option == "🔍 Search URL in Sitemap":
-        st.subheader("🔍 Search for a Specific URL in the Sitemap")
+    elif option == "📊 Compare Files Side by Side":
+        st.subheader("📊 Compare Files Side by Side")
+        
+        # Initialize session state for selected files if not exists
+        if "selected_files" not in st.session_state:
+            st.session_state.selected_files = []
+        
+        # Allow user to select files
+        file_selection_method = st.radio("Select files by:", ("Manual Input", "File Upload"))
+        
+        selected_files = []
+        
+        if file_selection_method == "Manual Input":
+            # Display current selected files
+            if st.session_state.selected_files:
+                st.write("Currently selected files:")
+                for i, file in enumerate(st.session_state.selected_files):
+                    st.text(f"{i+1}. {file}")
+                
+                if st.button("Clear Selection"):
+                    st.session_state.selected_files = []
+                    st.experimental_rerun()
+            
+            # Let user add new files
+            new_file = st.text_input("Enter File Path:")
+            if st.button("Add File") and new_file:
+                if os.path.isfile(new_file):
+                    st.session_state.selected_files.append(new_file)
+                    st.success(f"Added: {new_file}")
+                    st.experimental_rerun()
+                else:
+                    st.error(f"File not found: {new_file}")
+            
+            selected_files = st.session_state.selected_files
+        
+        else:  # File Upload
+            uploaded_files = st.file_uploader("Upload files to compare", accept_multiple_files=True)
+            if uploaded_files:
+                # Save uploaded files to temp directory
+                for uploaded_file in uploaded_files:
+                    with open(f"/tmp/{uploaded_file.name}", "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+                    selected_files.append(f"/tmp/{uploaded_file.name}")
+        
+        if len(selected_files) < 2:
+            st.warning("Please select at least 2 files to compare.")
+        else:
+            st.success(f"Comparing {len(selected_files)} files.")
+            
+            # Create tabs for different comparison views
+            content_tab, meta_tab, diff_tab = st.tabs(["Content View", "Metadata Comparison", "Differences"])
+            
+            with content_tab:
+                st.subheader("File Content")
+                file_tabs = st.tabs([os.path.basename(file) for file in selected_files])
+                
+                for i, (tab, file_path) in enumerate(zip(file_tabs, selected_files)):
+                    with tab:
+                        st.text(f"File: {file_path}")
+                        preview = read_file_preview(file_path)
+                        st.code(preview)
+            
+            with meta_tab:
+                st.subheader("File Metadata Comparison")
+                meta_df = compare_meta_properties(selected_files)
+                st.dataframe(meta_df)
+                
+                # Allow downloading meta comparison as CSV
+                csv = meta_df.to_csv(index=False).encode('utf-8')
+                st.download_button("Download Metadata CSV", csv, "file_metadata_comparison.csv", "text/csv")
+            
+            with diff_tab:
+                st.subheader("File Differences")
+                
+                if len(selected_files) == 2:
+                    # Direct comparison of 2 files
+                    diff = compare_file_content(selected_files[0], selected_files[1])
+                    st.code("\n".join(diff))
+                else:
+                    # For more than 2 files, let user select pairs to compare
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        file1_idx = st.selectbox("Select File 1:", range(len(selected_files)), format_func=lambda i: os.path.basename(selected_files[i]))
+                    
+                    with col2:
+                        file2_idx = st.selectbox("Select File 2:", range(len(selected_files)), format_func=lambda i: os.path.basename(selected_files[i]))
+                    
+                    if file1_idx != file2_idx:
+                        diff = compare_file_content(selected_files[file1_idx], selected_files[file2_idx])
+                        st.code("\n".join(diff))
+                    else:
+                        st.warning("Please select different files to compare.")
 
-        check_url = st.text_input("Enter URL to search:", "https://www.profoundproperties.com/")
-
-        if st.button("Search in Sitemap"):
+    elif option == "📡 Sitemap Checker":
+        st.subheader("📡 Sitemap Checker")
+        
+        sitemap_url = st.text_input("Enter Sitemap URL:", "https://www.example.com/sitemap.xml")
+        
+        if st.button("Fetch Sitemap"):
             with st.spinner("Fetching Sitemap URLs..."):
                 urls = asyncio.run(fetch_sitemap_urls(sitemap_url))
 
                 if not urls:
                     st.error("No URLs found in the sitemap.")
                     return
-
-                if check_url in urls:
-                    st.success(f"✅ URL {check_url} **exists** in the sitemap.")
-                else:
-                    st.error(f"❌ URL {check_url} **not found** in the sitemap.")
-
-    elif option == "✅ Check All URLs":
-        st.subheader("✅ Check the Status of All URLs in Sitemap")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            batch_size = st.number_input("Batch Size", min_value=10, max_value=500, value=100)
-        with col2:
-            max_concurrent = st.number_input("Max Concurrent Requests", min_value=10, max_value=100, value=50)
-        
-        # Add regex filter input
-        regex_pattern = st.text_input(
-            "Filter URLs by Regex Pattern (leave empty to check all):", 
-            "", 
-            help="Only URLs matching this pattern will be checked. Example: '/properties/' will only check URLs containing '/properties/'"
-        )
-        
-        # Add option to test regex pattern
-        if regex_pattern and st.button("Test Regex Pattern"):
-            try:
-                pattern = re.compile(regex_pattern)
-                st.success(f"✅ Valid regex pattern: `{regex_pattern}`")
                 
-                # Show example matches with the pattern
-                test_url = "https://www.profoundproperties.com/properties/villa-123"
-                if pattern.search(test_url):
-                    st.info(f"Example: Pattern would match URL like `{test_url}`")
-                else:
-                    st.info(f"Example: Pattern would NOT match URL like `{test_url}`")
-            except re.error as e:
-                st.error(f"❌ Invalid regex pattern: {e}")
-
-        if st.button("Start Checking URLs"):
-            with st.spinner("Fetching Sitemap URLs..."):
-                all_urls = asyncio.run(fetch_sitemap_urls(sitemap_url))
-
-                if not all_urls:
-                    st.error("No URLs found in the sitemap.")
-                    return
-
-                st.info(f"Found {len(all_urls)} URLs (excluding locales) in the sitemap.")
+                st.success(f"Found {len(urls)} URLs in the sitemap.")
                 
-                # Apply regex filtering if provided
-                filtered_urls = filter_urls_by_regex(all_urls, regex_pattern)
+                # Display the URLs
+                urls_df = pd.DataFrame({"URL": urls})
+                st.dataframe(urls_df)
                 
-                if regex_pattern:
-                    st.info(f"Filtered to {len(filtered_urls)} URLs matching pattern: `{regex_pattern}`")
-                    if len(filtered_urls) == 0:
-                        st.warning("No URLs match the given regex pattern. Please check your pattern and try again.")
-                        return
+                # Allow downloading URLs as CSV
+                csv = urls_df.to_csv(index=False).encode('utf-8')
+                st.download_button("Download URLs CSV", csv, "sitemap_urls.csv", "text/csv")
                 
-                st.info("🚀 Starting URL status check...")
-
-                results = asyncio.run(process_urls_in_batches(filtered_urls, batch_size, max_concurrent))
-
-                df = pd.DataFrame(results, columns=["URL", "Status Code", "Meta Title", "Meta Description", "Site Name"])
-
-                # Add filtering options
-                status_filter = st.multiselect("Filter by Status Code:", df["Status Code"].unique(), default=[200, 404])
-                filtered_df = df[df["Status Code"].isin(status_filter)]
-                
-                # Show the results
-                st.write(f"Results: {len(filtered_df)} URLs")
-                st.dataframe(filtered_df)
-
-                csv = filtered_df.to_csv(index=False).encode('utf-8')
-                st.download_button("Download CSV", csv, "sitemap_report.csv", "text/csv", key="download-csv")
-    
-    elif option == "🔎 Single URL Analysis":
-        st.subheader("🔎 Comprehensive Single URL Analysis")
-        st.write("Enter a URL to analyze its meta tags, get QR codes for easy access, and measure load times")
-        
-        analyze_url = st.text_input("Enter URL to analyze:", "https://www.example.com/")
-        
-        if st.button("Analyze URL"):
-            if not analyze_url.startswith(("http://", "https://")):
-                st.error("Please enter a valid URL starting with http:// or https://")
-                return
-            
-            with st.spinner(f"Analyzing {analyze_url}... This may take a minute."):
-                # Run the comprehensive analysis
-                results = asyncio.run(analyze_single_url(analyze_url))
-                
-                # Display the results
-                display_url_analysis(analyze_url, results)
-    
-    elif option == "🔄 Compare URLs":
-        st.subheader("🔄 Compare Multiple URLs")
-        st.write("Enter up to 5 URLs to compare their meta tags, load times, and other details")
-        
-        # Create input fields for up to 5 URLs
-        urls = []
-        for i in range(5):
-            url = st.text_input(f"URL {i+1}:", key=f"compare_url_{i}")
-            if url:
-                urls.append(url)
-        
-        if st.button("Compare URLs"):
-            if not urls:
-                st.error("Please enter at least one URL to compare")
-                return
-            
-            if any(not url.startswith(("http://", "https://")) for url in urls):
-                st.error("All URLs must start with http:// or https://")
-                return
-            
-            with st.spinner(f"Comparing {len(urls)} URLs... This may take a few minutes."):
-                # Run the comparison analysis
-                comparison_df, all_results = asyncio.run(compare_multiple_urls(urls))
-                
-                # Display the comparison results
-                display_comparison_results(comparison_df, all_results)
+                # Generate QR codes for a few example URLs
+                st.subheader("Sample QR Codes")
+                if len(urls) > 0:
+                    sample_size = min(3, len(urls))
+                    sample_urls = urls[:sample_size]
+                    
+                    cols = st.columns(sample_size)
+                    for i, (col, url) in enumerate(zip(cols, sample_urls)):
+                        with col:
+                            qr_code = generate_qr_code(url)
+                            st.image(f"data:image/png;base64,{qr_code}", caption=f"URL {i+1}", width=200)
+                            st.markdown(f"[{url}]({url})")
 
 if __name__ == "__main__":
     main()
