@@ -5,6 +5,7 @@ from selectolax.parser import HTMLParser
 import xml.etree.ElementTree as ET
 import asyncio
 import time
+import re
 
 LOCALE_PATHS = ["/ru/", "/zh-cn/", "/de/", "/fr/", "/ar/"]
 
@@ -85,6 +86,19 @@ async def process_urls_in_batches(urls, batch_size=100, max_concurrent=50):
     
     return results
 
+def filter_urls_by_regex(urls, regex_pattern):
+    """Filter URLs based on regex pattern."""
+    if not regex_pattern:
+        return urls
+    
+    try:
+        pattern = re.compile(regex_pattern)
+        filtered_urls = [url for url in urls if pattern.search(url)]
+        return filtered_urls
+    except re.error as e:
+        st.error(f"Invalid regex pattern: {e}")
+        return urls
+
 def main():
     st.title("Fast Sitemap Checker")
 
@@ -100,7 +114,7 @@ def main():
 
         if st.button("Search in Sitemap"):
             with st.spinner("Fetching Sitemap URLs..."):
-                urls = asyncio.run(fetch_sitemap_urls(sitemap_url))  # ✅ Corrected async handling
+                urls = asyncio.run(fetch_sitemap_urls(sitemap_url))
 
                 if not urls:
                     st.error("No URLs found in the sitemap.")
@@ -119,24 +133,60 @@ def main():
             batch_size = st.number_input("Batch Size", min_value=10, max_value=500, value=100)
         with col2:
             max_concurrent = st.number_input("Max Concurrent Requests", min_value=10, max_value=100, value=50)
+        
+        # Add regex filter input
+        regex_pattern = st.text_input(
+            "Filter URLs by Regex Pattern (leave empty to check all):", 
+            "", 
+            help="Only URLs matching this pattern will be checked. Example: '/properties/' will only check URLs containing '/properties/'"
+        )
+        
+        # Add option to test regex pattern
+        if regex_pattern and st.button("Test Regex Pattern"):
+            try:
+                pattern = re.compile(regex_pattern)
+                st.success(f"✅ Valid regex pattern: `{regex_pattern}`")
+                
+                # Show example matches with the pattern
+                test_url = "https://www.profoundproperties.com/properties/villa-123"
+                if pattern.search(test_url):
+                    st.info(f"Example: Pattern would match URL like `{test_url}`")
+                else:
+                    st.info(f"Example: Pattern would NOT match URL like `{test_url}`")
+            except re.error as e:
+                st.error(f"❌ Invalid regex pattern: {e}")
 
-        if st.button("Start Checking All URLs"):
+        if st.button("Start Checking URLs"):
             with st.spinner("Fetching Sitemap URLs..."):
-                urls = asyncio.run(fetch_sitemap_urls(sitemap_url))  # ✅ Corrected async handling
+                all_urls = asyncio.run(fetch_sitemap_urls(sitemap_url))
 
-                if not urls:
+                if not all_urls:
                     st.error("No URLs found in the sitemap.")
                     return
 
-                st.info(f"Found {len(urls)} URLs (excluding locales) in the sitemap.")
+                st.info(f"Found {len(all_urls)} URLs (excluding locales) in the sitemap.")
+                
+                # Apply regex filtering if provided
+                filtered_urls = filter_urls_by_regex(all_urls, regex_pattern)
+                
+                if regex_pattern:
+                    st.info(f"Filtered to {len(filtered_urls)} URLs matching pattern: `{regex_pattern}`")
+                    if len(filtered_urls) == 0:
+                        st.warning("No URLs match the given regex pattern. Please check your pattern and try again.")
+                        return
+                
                 st.info("🚀 Starting URL status check...")
 
-                results = asyncio.run(process_urls_in_batches(urls, batch_size, max_concurrent))  # ✅ Corrected async handling
+                results = asyncio.run(process_urls_in_batches(filtered_urls, batch_size, max_concurrent))
 
                 df = pd.DataFrame(results, columns=["URL", "Status Code", "Meta Title", "Meta Description", "Site Name"])
 
+                # Add filtering options
                 status_filter = st.multiselect("Filter by Status Code:", df["Status Code"].unique(), default=[200, 404])
                 filtered_df = df[df["Status Code"].isin(status_filter)]
+                
+                # Show the results
+                st.write(f"Results: {len(filtered_df)} URLs")
                 st.dataframe(filtered_df)
 
                 csv = filtered_df.to_csv(index=False).encode('utf-8')
