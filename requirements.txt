@@ -5,3 +5,4 @@ streamlit
 lxml
 selenium
 webdriver_manager
+playwright
