@@ -11,8 +11,6 @@ from datetime import datetime
 import urllib.parse
 import qrcode
 from io import BytesIO
-from difflib import SequenceMatcher
-import json
 
 LOCALE_PATHS = ["/ru/", "/zh-cn/", "/de/", "/fr/", "/ar/"]
 
@@ -167,88 +165,39 @@ async def extract_all_meta_tags(url):
                     link_data[attr] = value
                 meta_info.append(link_data)
             
-            return meta_info, html
+            return meta_info
     except Exception as e:
         st.error(f"Error extracting meta tags: {e}")
-        return [], None
-
-def extract_structured_data(html):
-    """Extract JSON-LD structured data from HTML."""
-    if not html:
         return []
-    
-    structured_data = []
-    for script in html.css('script[type="application/ld+json"]'):
-        try:
-            data = json.loads(script.text())
-            structured_data.append(data)
-        except json.JSONDecodeError:
-            continue
-    
-    return structured_data
 
-def extract_page_elements(html):
-    """Extract important page elements and their counts."""
-    if not html:
-        return {}
-    
-    elements = {}
-    
-    # Count headings
-    for i in range(1, 7):
-        elements[f'h{i}'] = len(html.css(f'h{i}'))
-    
-    # Count other important elements
-    elements['img'] = len(html.css('img'))
-    elements['a'] = len(html.css('a'))
-    elements['p'] = len(html.css('p'))
-    elements['ul'] = len(html.css('ul'))
-    elements['ol'] = len(html.css('ol'))
-    elements['div'] = len(html.css('div'))
-    elements['form'] = len(html.css('form'))
-    elements['iframe'] = len(html.css('iframe'))
-    elements['script'] = len(html.css('script'))
-    elements['style'] = len(html.css('style'))
-    
-    return elements
-
-def extract_main_content(html):
-    """Extract the main content text from HTML."""
-    if not html:
-        return ""
-    
-    # Try to find main content area
-    content_selectors = ['main', 'article', '#content', '.content', '#main', '.main']
-    
-    for selector in content_selectors:
-        content_area = html.css_first(selector)
-        if content_area:
-            # Remove script and style elements
-            for script in content_area.css('script'):
-                script.decompose()
-            for style in content_area.css('style'):
-                style.decompose()
+async def extract_page_elements(url):
+    """Extract common HTML elements and their count."""
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=30, follow_redirects=True)
+            if response.status_code != 200:
+                return {}
             
-            return content_area.text(strip=True)
-    
-    # If no content area found, extract body text
-    body = html.css_first('body')
-    if body:
-        # Remove script and style elements
-        for script in body.css('script'):
-            script.decompose()
-        for style in body.css('style'):
-            style.decompose()
-        
-        return body.text(strip=True)
-    
-    return ""
-
-def similar(a, b):
-    """Calculate similarity ratio between two strings."""
-    if not a or not b:
-        return 0
-    return SequenceMatcher(None, a, b).ratio()
+            html = HTMLParser(response.text)
+            elements = {}
+            
+            # Extract count of common HTML elements
+            elements["h1"] = len(html.css("h1"))
+            elements["h2"] = len(html.css("h2"))
+            elements["h3"] = len(html.css("h3"))
+            elements["p"] = len(html.css("p"))
+            elements["a"] = len(html.css("a"))
+            elements["img"] = len(html.css("img"))
+            elements["ul"] = len(html.css("ul"))
+            elements["ol"] = len(html.css("ol"))
+            elements["div"] = len(html.css("div"))
+            elements["form"] = len(html.css("form"))
+            elements["iframe"] = len(html.css("iframe"))
+            
+            return elements
+    except Exception as e:
+        st.error(f"Error extracting page elements: {e}")
+        return {}
 
 async def analyze_single_url(url):
     """Analyze a single URL and gather comprehensive details."""
@@ -290,19 +239,24 @@ async def analyze_single_url(url):
         
         results["meta_tags"] = meta_info
         
-        # Extract structured data
-        results["structured_data"] = extract_structured_data(html)
-        
         # Extract page elements
-        results["page_elements"] = extract_page_elements(html)
-        
-        # Extract main content
-        results["main_content"] = extract_main_content(html)
+        elements = {
+            "h1": len(html.css("h1")),
+            "h2": len(html.css("h2")),
+            "h3": len(html.css("h3")),
+            "p": len(html.css("p")),
+            "a": len(html.css("a")),
+            "img": len(html.css("img")),
+            "ul": len(html.css("ul")),
+            "ol": len(html.css("ol")),
+            "div": len(html.css("div")),
+            "form": len(html.css("form")),
+            "iframe": len(html.css("iframe"))
+        }
+        results["page_elements"] = elements
     else:
         results["meta_tags"] = []
-        results["structured_data"] = []
         results["page_elements"] = {}
-        results["main_content"] = ""
     
     # 2. Generate QR codes for easy access
     results["url_qr_code"] = generate_qr_code(url)
@@ -371,7 +325,7 @@ def display_url_analysis(url, results):
         st.warning("No page elements information available")
 
 async def compare_multiple_urls(urls):
-    """Compare multiple URLs (up to 5) for their meta details and content."""
+    """Compare multiple URLs in a single table format."""
     if not urls:
         st.error("No URLs provided for comparison.")
         return None, None
@@ -382,45 +336,25 @@ async def compare_multiple_urls(urls):
     
     # Analyze each URL
     all_results = {}
-    html_data = {}
     
     for i, url in enumerate(urls):
         progress_container.info(f"Analyzing URL {i+1}/{len(urls)}: {url}")
-        
-        # Fetch data
-        response, desktop_load_time = await fetch_url_with_timing(url)
-        meta_info, html = await extract_all_meta_tags(url)
-        
-        # Process results
-        results = {
-            "desktop_load_time": desktop_load_time,
-            "mobile_load_time": desktop_load_time * 1.2,
-            "googlebot_load_time": desktop_load_time * 0.9,
-            "meta_tags": meta_info,
-            "url_qr_code": generate_qr_code(url),
-            "mobile_url": f"{url}?device=mobile",
-            "mobile_qr_code": generate_qr_code(f"{url}?device=mobile"),
-            "structured_data": extract_structured_data(html),
-            "page_elements": extract_page_elements(html),
-            "main_content": extract_main_content(html)
-        }
-        
+        results = await analyze_single_url(url)
         all_results[url] = results
-        html_data[url] = html
     
     progress_container.success("All URLs analyzed successfully!")
     
     # Process the meta tags for comparison
     meta_comparison = {}
     
-    # Define important meta tags to track
-    common_meta_tags = [
+    # Important meta tags to track
+    important_meta_tags = [
         "title", "description", "keywords", "viewport", "robots", "canonical",
         "og:title", "og:description", "og:image", "og:url", "og:type", "og:site_name",
         "twitter:card", "twitter:title", "twitter:description", "twitter:image"
     ]
     
-    # First, collect all meta tag names across all URLs
+    # Collect all unique meta tag names across all URLs
     all_meta_names = set()
     all_meta_properties = set()
     
@@ -431,181 +365,144 @@ async def compare_multiple_urls(urls):
             if "property" in meta:
                 all_meta_properties.add(meta["property"])
     
-    # Create a combined list of important meta tags to compare
-    compare_meta_tags = list(common_meta_tags)
-    for name in all_meta_names:
-        if name not in compare_meta_tags:
-            compare_meta_tags.append(name)
-    for prop in all_meta_properties:
-        if prop not in compare_meta_tags:
-            compare_meta_tags.append(prop)
+    # Create a comprehensive table with all meta information
+    comparison_data = []
     
-    # Now create a comparison dict for each URL
+    # For each URL, extract key metrics and meta tags
     for url, results in all_results.items():
-        url_meta = {"load_time": f"{results['desktop_load_time']:.2f}s"}
+        url_short = url.replace("https://", "").replace("http://", "").split("/")[0]
         
-        # Initialize with empty values
-        for tag in compare_meta_tags:
-            url_meta[tag] = ""
+        # Basic URL info
+        row = {
+            "URL": url,
+            "Display Name": url_short,
+            "Load Time (s)": round(results["desktop_load_time"], 2)
+        }
         
-        # Fill in values from meta tags
+        # Extract meta tags
+        meta_dict = {}
         for meta in results["meta_tags"]:
             if "element" in meta and meta["element"] == "title":
-                url_meta["title"] = meta.get("content", "")
-            elif "name" in meta and meta["name"] in compare_meta_tags:
-                url_meta[meta["name"]] = meta.get("content", "")
-            elif "property" in meta and meta["property"] in compare_meta_tags:
-                url_meta[meta["property"]] = meta.get("content", "")
+                meta_dict["title"] = meta.get("content", "")
+            elif "name" in meta:
+                meta_dict[meta["name"]] = meta.get("content", "")
+            elif "property" in meta:
+                meta_dict[meta["property"]] = meta.get("content", "")
+        
+        # Add important meta tags to the row
+        for tag in important_meta_tags:
+            row[f"Meta: {tag}"] = meta_dict.get(tag, "")
         
         # Add page element counts
         for elem, count in results["page_elements"].items():
-            url_meta[f"elements_{elem}"] = count
+            row[f"Element: {elem}"] = count
         
-        meta_comparison[url] = url_meta
+        comparison_data.append(row)
     
-    # Create a comparison table
-    comparison_df = pd.DataFrame.from_dict(meta_comparison, orient='index')
+    # Create a single comprehensive comparison table
+    comparison_df = pd.DataFrame(comparison_data)
     
-    # Perform content similarity analysis
-    content_similarity = {}
-    if len(urls) > 1:
-        for i, url1 in enumerate(urls):
-            for j, url2 in enumerate(urls):
-                if i < j:  # Compare each pair once
-                    content1 = all_results[url1]["main_content"]
-                    content2 = all_results[url2]["main_content"]
-                    
-                    # Calculate similarity
-                    sim_ratio = similar(content1, content2)
-                    content_similarity[(url1, url2)] = sim_ratio
-    
-    # Return all results for detailed view
-    return comparison_df, all_results, content_similarity
+    return comparison_df, all_results
 
-def display_comparison_results(comparison_df, all_results, content_similarity):
-    """Display the enhanced comparison results with side-by-side analysis."""
+def display_comparison_in_single_table(comparison_df, all_results):
+    """Display the comparison results in a single comprehensive table."""
     st.subheader("📊 URL Comparison Results")
     
-    # Group meta tags into categories for better display
-    meta_categories = {
-        "Basic SEO": ["title", "description", "keywords", "robots", "canonical"],
-        "Open Graph": [col for col in comparison_df.columns if col.startswith("og:")],
-        "Twitter Cards": [col for col in comparison_df.columns if col.startswith("twitter:")],
-        "Page Elements": [col for col in comparison_df.columns if col.startswith("elements_")],
-        "Technical": ["viewport", "charset", "content-type", "load_time"]
-    }
+    # Create categories for organize the comparison
+    categories = [
+        {"name": "Basic Info", "prefix": "", "columns": ["URL", "Display Name", "Load Time (s)"]},
+        {"name": "SEO Meta Tags", "prefix": "Meta: ", "columns": ["Meta: title", "Meta: description", "Meta: keywords", "Meta: robots", "Meta: canonical"]},
+        {"name": "Open Graph", "prefix": "Meta: og:", "columns": [col for col in comparison_df.columns if col.startswith("Meta: og:")]},
+        {"name": "Twitter Cards", "prefix": "Meta: twitter:", "columns": [col for col in comparison_df.columns if col.startswith("Meta: twitter:")]},
+        {"name": "HTML Elements", "prefix": "Element: ", "columns": [col for col in comparison_df.columns if col.startswith("Element: ")]}
+    ]
     
-    # Create a more visual comparison using tabs for different categories
-    st.write("### Side-by-Side Meta Tag Comparison")
+    # Display URL comparison in a single table with all data
+    st.write("### 📑 Complete URL Comparison")
     
-    meta_tabs = st.tabs(list(meta_categories.keys()))
+    # First display a basic URL info table
+    st.write("#### Basic Information")
+    basic_cols = ["URL", "Display Name", "Load Time (s)"]
+    basic_df = comparison_df[basic_cols].copy()
+    st.dataframe(basic_df)
     
-    # For each category, display a side-by-side comparison
-    for i, (category, fields) in enumerate(meta_categories.items()):
-        with meta_tabs[i]:
-            # Filter the columns that exist in our dataframe
-            available_fields = [field for field in fields if field in comparison_df.columns]
+    # Comprehensive side-by-side comparison table
+    st.write("#### Side-by-Side Comparison")
+    
+    # Reshape the data for easier comparison - pivot the table
+    # First create a unique identifier for each URL
+    comparison_df['URL_ID'] = comparison_df['Display Name']
+    
+    # For each category, create a pivot table
+    for category in categories:
+        if category["name"] == "Basic Info":
+            continue  # Skip basic info as we already displayed it
             
-            if available_fields:
-                category_df = comparison_df[available_fields]
-                
-                # Transpose for better side-by-side comparison
-                st.dataframe(category_df.T, use_container_width=True)
-                
-                # Highlight differences
-                for field in available_fields:
-                    if field in comparison_df.columns:
-                        values = comparison_df[field].unique()
-                        if len(values) > 1 and not all(pd.isna(v) for v in values):
-                            st.warning(f"⚠️ Inconsistent {field} values across URLs")
-            else:
-                st.info(f"No {category} tags found for comparison")
-    
-    # Display content similarity matrix
-    if content_similarity:
-        st.write("### 📝 Content Similarity Analysis")
-        st.write("This shows how similar the main content is between each pair of URLs (1.0 = identical)")
+        st.write(f"##### {category['name']}")
         
-        # Create a nice visual similarity matrix
-        similarity_data = []
-        for (url1, url2), similarity in content_similarity.items():
-            similarity_data.append({
-                "URL 1": url1,
-                "URL 2": url2,
-                "Similarity": similarity,
-                "Visual": "🟩" * int(similarity * 10) + "⬜" * (10 - int(similarity * 10))
-            })
+        # Get the columns for this category
+        category_cols = [col for col in category["columns"] if col in comparison_df.columns]
         
-        similarity_df = pd.DataFrame(similarity_data)
-        st.dataframe(similarity_df, use_container_width=True)
+        if category_cols:
+            # Create a subset dataframe with just these columns
+            subset_df = comparison_df[["URL_ID"] + category_cols].copy()
+            
+            # Remove the prefix from column names for cleaner display
+            for col in category_cols:
+                if category["prefix"] and col.startswith(category["prefix"]):
+                    new_col = col.replace(category["prefix"], "")
+                    subset_df = subset_df.rename(columns={col: new_col})
+            
+            # Set URL_ID as index for better display
+            subset_df = subset_df.set_index("URL_ID")
+            
+            # Display the category-specific comparison table
+            st.dataframe(subset_df)
+            
+            # Check for inconsistencies
+            for col in category_cols:
+                cleaned_col = col.replace(category["prefix"], "")
+                values = comparison_df[col].dropna().unique()
+                if len(values) > 1:
+                    st.warning(f"⚠️ Inconsistent '{cleaned_col}' values detected")
+        else:
+            st.info(f"No {category['name']} found for comparison")
     
-    # Allow downloading comparison as CSV
-    csv = comparison_df.to_csv(index=True).encode('utf-8')
-    st.download_button("Download Comparison CSV", csv, "url_comparison.csv", "text/csv")
+    # Allow downloading the full comparison table as CSV
+    csv = comparison_df.to_csv(index=False).encode('utf-8')
+    st.download_button("Download Full Comparison CSV", csv, "url_comparison.csv", "text/csv")
     
-    # Display load time comparison
+    # Display a visual load time comparison
     st.write("### ⏱️ Load Time Comparison")
     
-    load_times = {}
-    for url, results in all_results.items():
-        load_times[url] = results["desktop_load_time"]
+    # Create a bar chart for load times
+    load_time_df = comparison_df[["Display Name", "Load Time (s)"]].copy()
+    load_time_df = load_time_df.sort_values("Load Time (s)")
     
-    # Sort by load time
-    sorted_urls = sorted(load_times.items(), key=lambda x: x[1])
+    st.bar_chart(load_time_df.set_index("Display Name"))
     
-    # Create a bar chart
-    load_time_df = pd.DataFrame({
-        'URL': [url for url, _ in sorted_urls],
-        'Load Time (s)': [time for _, time in sorted_urls]
-    })
+    # Element count comparison
+    st.write("### 📊 HTML Element Comparison")
     
-    st.bar_chart(load_time_df.set_index('URL'))
+    # Get all element columns
+    element_cols = [col for col in comparison_df.columns if col.startswith("Element: ")]
     
-    # Display detailed results for each URL
-    st.write("### 🔍 Detailed Element Counts")
-    
-    # Create a DataFrame with element counts for each URL
-    element_counts = {}
-    for url, results in all_results.items():
-        element_counts[url] = results["page_elements"]
-    
-    element_df = pd.DataFrame(element_counts)
-    st.dataframe(element_df)
-    
-    # Display tabs for each URL's full details
-    st.write("### 📑 Individual URL Details")
-    
-    tabs = st.tabs([f"URL {i+1}" for i in range(len(all_results))])
-    
-    for i, (tab, (url, results)) in enumerate(zip(tabs, all_results.items())):
-        with tab:
-            st.subheader(f"URL {i+1}: {url}")
-            
-            # Show QR code
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write("#### QR Code")
-                st.image(f"data:image/png;base64,{results['url_qr_code']}", width=200)
-            
-            with col2:
-                st.write("#### Key Metrics")
-                st.metric("Load Time", f"{results['desktop_load_time']:.2f}s")
-                st.metric("Element Count", sum(results['page_elements'].values()))
-            
-            # Show meta tags
-            with st.expander("Meta Tags"):
-                if results["meta_tags"]:
-                    meta_df = pd.DataFrame(results["meta_tags"])
-                    st.dataframe(meta_df)
-                else:
-                    st.warning("No meta tags found")
-            
-            # Show structured data
-            with st.expander("Structured Data"):
-                if results["structured_data"]:
-                    st.json(results["structured_data"])
-                else:
-                    st.warning("No structured data found")
+    if element_cols:
+        # Create a subset with just element counts
+        element_df = comparison_df[["Display Name"] + element_cols].copy()
+        
+        # Clean column names
+        for col in element_cols:
+            new_col = col.replace("Element: ", "")
+            element_df = element_df.rename(columns={col: new_col})
+        
+        # Set URL as index
+        element_df = element_df.set_index("Display Name")
+        
+        # Display the element comparison
+        st.dataframe(element_df)
+    else:
+        st.info("No element count data available for comparison")
 
 def main():
     st.title("Fast Sitemap Checker")
@@ -704,7 +601,7 @@ def main():
                 st.dataframe(filtered_df)
 
                 csv = filtered_df.to_csv(index=False).encode('utf-8')
-                st.download_button("Download CSV", csv, "sitemap_report.csv", "text/csv")
+                st.download_button("Download CSV", csv, "sitemap_report.csv", "text/csv", key="download-csv")
     
     elif option == "🔎 Single URL Analysis":
         st.subheader("🔎 Comprehensive Single URL Analysis")
@@ -725,8 +622,8 @@ def main():
                 display_url_analysis(analyze_url, results)
     
     elif option == "🔄 Compare URLs":
-        st.subheader("🔄 Compare Multiple URLs Side by Side")
-        st.write("Enter up to 5 URLs to compare their content, structure, elements, and meta tags")
+        st.subheader("🔄 Side-by-Side URL Comparison")
+        st.write("Enter up to 5 URLs to compare them side by side in a comprehensive table")
         
         # Create input fields for up to 5 URLs
         urls = []
@@ -734,9 +631,6 @@ def main():
             url = st.text_input(f"URL {i+1}:", key=f"compare_url_{i}")
             if url:
                 urls.append(url)
-        
-        # Add checkbox to enable similar content detection
-        content_similarity_enabled = st.checkbox("Enable content similarity analysis", value=True)
         
         if st.button("Compare URLs Side by Side"):
             if not urls:
@@ -749,7 +643,10 @@ def main():
             
             with st.spinner(f"Comparing {len(urls)} URLs... This may take a few minutes."):
                 # Run the comparison analysis
-                comparison_df, all_results, content_similarity = asyncio.run(compare_multiple_urls(urls))
+                comparison_df, all_results = asyncio.run(compare_multiple_urls(urls))
                 
-                # Display the comparison results
-                display_comparison_results(comparison_df, all_results, content_similarity if content_similarity_enabled else {})
+                # Display the comparison results in a single table
+                display_comparison_in_single_table(comparison_df, all_results)
+
+if __name__ == "__main__":
+    main()
