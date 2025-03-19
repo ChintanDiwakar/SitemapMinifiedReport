@@ -6,6 +6,16 @@ import xml.etree.ElementTree as ET
 import asyncio
 import time
 import re
+import base64
+from PIL import Image
+import io
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+import tempfile
+import os
+from datetime import datetime
 
 LOCALE_PATHS = ["/ru/", "/zh-cn/", "/de/", "/fr/", "/ar/"]
 
@@ -99,13 +109,186 @@ def filter_urls_by_regex(urls, regex_pattern):
         st.error(f"Invalid regex pattern: {e}")
         return urls
 
+def setup_webdriver(device="desktop"):
+    """Set up and return a configured webdriver for screenshots."""
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    
+    # Add user agent for Googlebot
+    if device == "googlebot":
+        options.add_argument("user-agent=Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)")
+    # Add mobile emulation for mobile device
+    elif device == "mobile":
+        mobile_emulation = {
+            "deviceMetrics": {"width": 360, "height": 640, "pixelRatio": 3.0},
+            "userAgent": "Mozilla/5.0 (Linux; Android 10; SM-G981B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.132 Mobile Safari/537.36"
+        }
+        options.add_experimental_option("mobileEmulation", mobile_emulation)
+    
+    # Install webdriver
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
+    
+    # Set window size for desktop
+    if device == "desktop" or device == "googlebot":
+        driver.set_window_size(1366, 768)
+    
+    return driver
+
+def take_screenshot(url, device="desktop"):
+    """Take a screenshot of the URL with specified device emulation."""
+    try:
+        driver = setup_webdriver(device)
+        
+        start_time = time.time()
+        driver.get(url)
+        load_time = time.time() - start_time
+        
+        # Wait for page to fully load
+        time.sleep(2)
+        
+        # Create a temporary file to save the screenshot
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+            driver.save_screenshot(tmp.name)
+            tmp_name = tmp.name
+        
+        # Read the screenshot and convert to base64
+        with open(tmp_name, "rb") as img_file:
+            img_data = base64.b64encode(img_file.read()).decode()
+        
+        # Clean up the temporary file
+        os.unlink(tmp_name)
+        
+        # Close the driver
+        driver.quit()
+        
+        return img_data, load_time
+    except Exception as e:
+        st.error(f"Error taking screenshot: {e}")
+        return None, 0
+
+def extract_all_meta_tags(url):
+    """Extract all meta tags from a URL."""
+    try:
+        response = httpx.get(url, timeout=10, follow_redirects=True)
+        if response.status_code != 200:
+            return []
+        
+        html = HTMLParser(response.text)
+        meta_tags = html.css("meta")
+        
+        meta_info = []
+        for tag in meta_tags:
+            attributes = tag.attributes
+            meta_data = {}
+            for attr, value in attributes.items():
+                meta_data[attr] = value
+            meta_info.append(meta_data)
+        
+        return meta_info
+    except Exception as e:
+        st.error(f"Error extracting meta tags: {e}")
+        return []
+
+def analyze_single_url(url):
+    """Analyze a single URL and gather comprehensive details."""
+    results = {}
+    
+    # Start timing the overall analysis
+    analysis_start = time.time()
+    
+    # 1. Extract all meta details
+    st.write("📋 Extracting meta tags...")
+    meta_tags = extract_all_meta_tags(url)
+    results["meta_tags"] = meta_tags
+    
+    # 2. Take desktop screenshot
+    st.write("🖥️ Taking desktop screenshot...")
+    desktop_img, desktop_load_time = take_screenshot(url, "desktop")
+    results["desktop_screenshot"] = desktop_img
+    results["desktop_load_time"] = desktop_load_time
+    
+    # 3. Take mobile screenshot
+    st.write("📱 Taking mobile screenshot...")
+    mobile_img, mobile_load_time = take_screenshot(url, "mobile")
+    results["mobile_screenshot"] = mobile_img
+    results["mobile_load_time"] = mobile_load_time
+    
+    # 4. Take Googlebot screenshot
+    st.write("🤖 Taking Googlebot screenshot...")
+    googlebot_img, googlebot_load_time = take_screenshot(url, "googlebot")
+    results["googlebot_screenshot"] = googlebot_img
+    results["googlebot_load_time"] = googlebot_load_time
+    
+    # Calculate overall analysis time
+    results["total_analysis_time"] = time.time() - analysis_start
+    
+    return results
+
+def display_url_analysis(url, results):
+    """Display the comprehensive URL analysis results."""
+    st.subheader(f"📊 Analysis Results for {url}")
+    
+    # Display load times
+    st.write("### ⏱️ Load Times")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Desktop Load Time", f"{results['desktop_load_time']:.2f}s")
+    with col2:
+        st.metric("Mobile Load Time", f"{results['mobile_load_time']:.2f}s")
+    with col3:
+        st.metric("Googlebot Load Time", f"{results['googlebot_load_time']:.2f}s")
+    
+    st.info(f"Total analysis completed in {results['total_analysis_time']:.2f} seconds")
+    
+    # Display screenshots
+    st.write("### 📸 Screenshots")
+    tab1, tab2, tab3 = st.tabs(["Desktop", "Mobile", "Googlebot"])
+    
+    with tab1:
+        if results["desktop_screenshot"]:
+            st.image(f"data:image/png;base64,{results['desktop_screenshot']}", caption="Desktop View", use_column_width=True)
+        else:
+            st.error("Failed to capture desktop screenshot")
+    
+    with tab2:
+        if results["mobile_screenshot"]:
+            st.image(f"data:image/png;base64,{results['mobile_screenshot']}", caption="Mobile View", use_column_width=True)
+        else:
+            st.error("Failed to capture mobile screenshot")
+    
+    with tab3:
+        if results["googlebot_screenshot"]:
+            st.image(f"data:image/png;base64,{results['googlebot_screenshot']}", caption="As seen by Googlebot", use_column_width=True)
+        else:
+            st.error("Failed to capture Googlebot screenshot")
+    
+    # Display meta tags
+    st.write("### 🏷️ Meta Tags")
+    if results["meta_tags"]:
+        meta_df = pd.DataFrame(results["meta_tags"])
+        st.dataframe(meta_df)
+        
+        # Allow downloading meta tags as CSV
+        csv = meta_df.to_csv(index=False).encode('utf-8')
+        st.download_button("Download Meta Tags CSV", csv, f"meta_tags_{url.replace('://', '_').replace('/', '_')}.csv", "text/csv")
+    else:
+        st.warning("No meta tags found")
+
 def main():
     st.title("Fast Sitemap Checker")
 
     # Sidebar for navigation
-    option = st.sidebar.radio("Select Functionality", ["🔍 Search URL in Sitemap", "✅ Check All URLs"])
+    option = st.sidebar.radio("Select Functionality", [
+        "🔍 Search URL in Sitemap", 
+        "✅ Check All URLs", 
+        "🔎 Single URL Analysis"
+    ])
 
-    sitemap_url = st.text_input("Enter Sitemap URL:", "https://www.profoundproperties.com/sitemap.xml")
+    if option in ["🔍 Search URL in Sitemap", "✅ Check All URLs"]:
+        sitemap_url = st.text_input("Enter Sitemap URL:", "https://www.profoundproperties.com/sitemap.xml")
 
     if option == "🔍 Search URL in Sitemap":
         st.subheader("🔍 Search for a Specific URL in the Sitemap")
@@ -191,6 +374,24 @@ def main():
 
                 csv = filtered_df.to_csv(index=False).encode('utf-8')
                 st.download_button("Download CSV", csv, "sitemap_report.csv", "text/csv", key="download-csv")
+    
+    elif option == "🔎 Single URL Analysis":
+        st.subheader("🔎 Comprehensive Single URL Analysis")
+        st.write("Enter a URL to analyze its meta tags, take screenshots, and measure load times")
+        
+        analyze_url = st.text_input("Enter URL to analyze:", "https://www.example.com/")
+        
+        if st.button("Analyze URL"):
+            if not analyze_url.startswith(("http://", "https://")):
+                st.error("Please enter a valid URL starting with http:// or https://")
+                return
+            
+            with st.spinner(f"Analyzing {analyze_url}... This may take a minute."):
+                # Run the comprehensive analysis
+                results = analyze_single_url(analyze_url)
+                
+                # Display the results
+                display_url_analysis(analyze_url, results)
 
 if __name__ == "__main__":
     main()
