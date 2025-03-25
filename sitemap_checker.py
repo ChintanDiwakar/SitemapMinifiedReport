@@ -593,8 +593,17 @@ def main():
                 df = pd.DataFrame(results, columns=["URL", "Status Code", "Meta Title", "Meta Description", "Site Name"])
 
                 # Add filtering options
-                status_filter = st.multiselect("Filter by Status Code:", df["Status Code"].unique(), default=[200, 404])
+                # Add filtering options
+                unique_status_codes = df["Status Code"].unique()
+                # Create a safe list of default values that exist in the unique status codes
+                default_status_codes = [code for code in [200, 404] if code in unique_status_codes]
+                # If no default values were found, use all unique status codes as defaults
+                if not default_status_codes and len(unique_status_codes) > 0:
+                    default_status_codes = list(unique_status_codes)
+                
+                status_filter = st.multiselect("Filter by Status Code:", unique_status_codes, default=default_status_codes)
                 filtered_df = df[df["Status Code"].isin(status_filter)]
+                # filtered_df = df[df["Status Code"].isin(status_filter)]
                 
                 # Show the results
                 st.write(f"Results: {len(filtered_df)} URLs")
